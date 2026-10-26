@@ -32,7 +32,7 @@ firmware, your prospero-win version and the newest
 | Wine prefix | prospero-win can't create one on the console (it can't run `wineboot` there), so the game gets a prefix of its own, made on a PC with the same Wine version and with every Windows module replaced by the copy in prospero-win's release. |
 | Controller | The game has its own gamepad support. Under Wine it reads controllers through XInput, and prospero-win makes the DualSense look like an Xbox controller, so the game sees it as controller 0. |
 | Keyboard and mouse | USB keyboard and mouse work alongside the pad. The mouse wheel doesn't work in prospero-win yet, so camera zoom by wheel is out. |
-| Updates | The in-game updater runs on the console, and `azs_ps5.py update` does the same job from your PC. See [Updates](#updates). |
+| Updates | The in-game updater works on the console: it installs the update, then shows an error because it can't restart itself; restart the game by hand. `azs_ps5.py update` does the same job from your PC. See [Updates](#updates). |
 
 The details, and how each one was checked, are in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
@@ -144,16 +144,20 @@ This reads the same update server the game uses (`wow.aethus.pl/exe/latest.json`
 and `.../data/patches.json`). It downloads the new program and any new or
 changed game data, checks every SHA-256 and sends only what changed.
 
-**On the console, from the game:** when a new version is out, the game offers
-**Download & restart**. The download and install work on the PS5. The
-restart can't: a PS5 app runs one process and can't start a new one. So
-after installing, the game shows *"Could not put the update in place"*.
-That message comes from the restart step only. The new files are already
-in place. Hold **Options + Create** to quit, start the game again from the
-launcher, and you're on the new version.
+**On the console, from the game (works):** when a new version is out, the
+game offers to update. Pick it and let it download. When it finishes you will
+probably see an error like:
 
-If you'd rather not see that message, choose **Later** in the game and run
-`update` from your PC instead.
+> *Could not put the update in place: Access denied. (os error 5)*
+
+**Ignore it: the update is installed.** Hold **Options + Create** to quit, start
+Azeroth Survivors again from prospero-win's launcher, and you're on the new
+version. (Tested on a PS5: v0.120.0 → v0.120.1.) The message comes from the
+game's last step, restarting itself, which a PS5 app can't do: it runs one
+process and can't start another. The new files are already in place by then.
+
+If you'd rather not see the message, skip the in-game update and run `update`
+from your PC instead (with the game closed).
 
 ## Other commands
 

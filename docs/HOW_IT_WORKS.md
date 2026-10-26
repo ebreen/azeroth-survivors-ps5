@@ -94,7 +94,11 @@ xinput1_4, to the title's DualSense when the profile's input mode is
    shows *"Could not put the update in place: {error}"*.
 
 A PS5 title can't create processes (prospero-win's Wine patch 0550), so
-step 4 always fails on the console. Steps 1–3 have already run by then,
+step 4 always fails on the console. Seen on a PS5 (v0.120.0 → v0.120.1): the
+game reported *"Could not put the update in place: Access denied. (os error 5)"*,
+yet `AzerothSurvivors.exe` was already the new version (the old one renamed to
+`AzerothSurvivors.old`, the download left as `AzerothSurvivors.update`), and the
+next start from the launcher ran v0.120.1. Steps 1–3 have already run by then,
 though, so quitting and starting the game again from the launcher runs the
 new version. The README tells players to do that.
 
