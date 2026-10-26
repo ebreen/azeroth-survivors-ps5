@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.rar
+*.zip
+*.MPQ
+*.exe
+*.part
+ps5-copy/

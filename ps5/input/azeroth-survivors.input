@@ -1,0 +1,10 @@
+; Azeroth Survivors on the DualSense: the game has its own gamepad support
+; and reads it through XInput, so the DualSense is simply its Xbox
+; controller 0 (Cross/Circle/Square/Triangle = A/B/X/Y, L1/R1 = LB/RB,
+; L2/R2 = LT/RT, Options = Start, Create or the touchpad's left half = Back).
+; No stick moves the pointer, so the game's own stick aiming is not fought
+; over. A USB keyboard and mouse keep working alongside it.
+; Hold Options + Create for three seconds to close the game.
+[input]
+mode = xinput
+mouse = none

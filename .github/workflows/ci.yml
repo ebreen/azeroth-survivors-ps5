@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly: catches prospero-win changing its profile rules
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyftpdlib
+      - run: python -m unittest discover -s tests -v
+
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the profile and preset with prospero-win's rules
+        run: |
+          git clone --depth 1 https://github.com/mpereiraesaa/prospero-win-profiles /tmp/pwp
+          mkdir -p /tmp/check/profiles /tmp/check/input
+          cp ps5/profiles/*.profile /tmp/check/profiles/
+          cp ps5/input/*.input /tmp/check/input/
+          (cd /tmp/check/profiles && ls *.profile) > /tmp/check/profiles/profiles.lst
+          python3 /tmp/pwp/tools/check_profiles.py /tmp/check
