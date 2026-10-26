@@ -47,12 +47,23 @@ PS5_FILES = HERE / "ps5"
 
 SLUG = "azeroth-survivors"
 EXE = "AzerothSurvivors.exe"
-GAME_DIR = "prefix/drive_c/Games/AzerothSurvivors"      # the default prefix's C:\Games\AzerothSurvivors
+PREFIX_DIR = f"prefixes/{SLUG}"                           # the game's own Wine prefix on the console
+GAME_DIR = f"{PREFIX_DIR}/drive_c/Games/AzerothSurvivors" # its C:\Games\AzerothSurvivors
+LEGACY_GAME_DIR = "prefix/drive_c/Games/AzerothSurvivors" # where 0.1 put it (the default prefix; it can't run there)
 PROFILE = f"profiles/{SLUG}.profile"
 PROFILE_LIST = "profiles/profiles.lst"
 PRESET = f"input/{SLUG}.input"
 MARKER = f"{GAME_DIR}/azs-ps5.json"                      # what this tool last put there
 CATALOG_MAX = 16                                          # the launcher drops profiles.lst above this
+
+# The prefix: built by tools/build_prefix.sh (GitHub Actions) from prospero-win's
+# release and published as a release of this repository; ps5/prefix.json pins it.
+PREFIX_MANIFEST = PS5_FILES / "prefix.json"
+PREFIX_URL = os.environ.get("AZS_PREFIX_URL", "")         # overrides the manifest's url (tests, mirrors)
+REGISTRY = ("system.reg", "user.reg", "userdef.reg")      # sent last: their presence marks a whole prefix
+# Wine reads HKCU\Environment into the game's environment. wgpu hides the console's
+# RADV adapter as "not Vulkan compliant" without the first ("Unable to find a GPU!").
+GAME_ENV = {"WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER": "1", "WGPU_BACKEND": "vulkan"}
 
 # Where `fetch` gets the Windows build: the developers' fast download mirror (its page
 # names the current .rar, its version and its SHA-256), falling back to the official
@@ -432,6 +443,96 @@ def write_marker(target, marker: dict) -> None:
     target.put_bytes(MARKER, (json.dumps(marker, indent=1, sort_keys=True) + "\n").encode())
 
 
+# ---------------------------------------------------------------- the Wine prefix
+
+def prefix_manifest() -> dict:
+    try:
+        manifest = json.loads(PREFIX_MANIFEST.read_text())
+    except (OSError, ValueError) as error:
+        raise Failure(f"{PREFIX_MANIFEST} is missing or damaged: {error}") from error
+    if PREFIX_URL:
+        manifest["url"] = PREFIX_URL
+    if not all(manifest.get(k) for k in ("url", "sha256", "size", "prospero_win")):
+        raise Failure(f"{PREFIX_MANIFEST} is incomplete")
+    return manifest
+
+
+def fetch_prefix(manifest: dict) -> Path:
+    """The prefix zip in the cache, downloaded and checked against the manifest."""
+    cached = CACHE / "prefix" / f"{manifest['sha256']}.zip"
+    if cached.is_file() and cached.stat().st_size == int(manifest["size"]):
+        return cached
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Downloading the Wine prefix for prospero-win {manifest['prospero_win']} ({human(int(manifest['size']))})")
+    download(manifest["url"], cached, manifest["sha256"])
+    return cached
+
+
+def prefix_complete(target) -> bool:
+    return all(target.size(f"{PREFIX_DIR}/{name}") for name in REGISTRY) and \
+        bool(target.size(f"{PREFIX_DIR}/drive_c/windows/system32/kernel32.dll"))
+
+
+def install_prefix(target, reinstall: bool = False) -> None:
+    """Puts the game's Wine prefix on the console. An existing whole prefix is kept
+    (its registry holds the game's settings), only its game settings are checked."""
+    if prefix_complete(target) and not reinstall:
+        log(f"  the Wine prefix is already there ({PREFIX_DIR}); keeping it")
+        return
+    manifest = prefix_manifest()
+    archive = fetch_prefix(manifest)
+    with zipfile.ZipFile(archive) as z:
+        members = [m for m in z.infolist() if not m.is_dir()]
+        for m in z.infolist():
+            if m.is_dir():
+                target.makedirs(f"{PREFIX_DIR}/{m.filename.rstrip('/')}")
+        # The registry last: a prefix with its registry is a whole one.
+        members.sort(key=lambda m: m.filename in REGISTRY)
+        total = sum(m.file_size for m in members)
+        log(f"  {len(members)} files ({human(total)}) to {PREFIX_DIR}")
+        progress = Progress("Wine prefix", total)
+        sent = 0
+        for m in members:
+            rel = f"{PREFIX_DIR}/{m.filename}"
+            if not reinstall and m.filename not in REGISTRY and target.size(rel) == m.file_size:
+                progress.add(m.file_size)
+                continue
+            with z.open(m) as stream:
+                target.put_stream(rel, stream, progress)
+            sent += 1
+        progress.finish()
+        log(f"  sent {sent} files, {len(members) - sent} were already there")
+
+
+def ensure_game_env(target) -> bool:
+    """Makes sure HKCU\\Environment in the prefix's user.reg has GAME_ENV. True if changed."""
+    rel = f"{PREFIX_DIR}/user.reg"
+    data = target.get_bytes(rel)
+    if data is None:
+        raise Failure(f"{rel} is missing: the Wine prefix is not complete; run install again")
+    reg = data.decode("utf-8")
+    newline = "\r\n" if "\r\n" in reg else "\n"
+    lines = reg.split(newline)
+    head = next((i for i, l in enumerate(lines) if l.startswith("[Environment]")), None)
+    want = {k: f'"{k}"="{v}"' for k, v in GAME_ENV.items()}
+    if head is None:
+        while lines and lines[-1] == "":
+            lines.pop()
+        lines += ["", f"[Environment] {int(time.time())}", *want.values(), ""]
+    else:
+        end = next((i for i in range(head + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        body = lines[head + 1:end]
+        if all(line in body for line in want.values()):
+            return False
+        body = [l for l in body if not any(l.startswith(f'"{k}"=') for k in want)]
+        while body and body[-1] == "":
+            body.pop()
+        lines[head + 1:end] = body + list(want.values()) + [""]
+    target.put_bytes(rel, newline.join(lines).encode("utf-8"))
+    log("  set the game's GPU settings in the prefix's registry")
+    return True
+
+
 def install_profile(target) -> None:
     profile = (PS5_FILES / "profiles" / f"{SLUG}.profile").read_bytes()
     preset = (PS5_FILES / "input" / f"{SLUG}.input").read_bytes()
@@ -650,6 +751,13 @@ def cmd_fetch(args) -> None:
     log(f"Saved {out}. Next: azs_ps5.py install \"{out}\" --host <PS5 IP>")
 
 
+def remove_legacy(target) -> None:
+    """0.1 put the game into prospero-win's default prefix, which can't run it."""
+    if target.exists_dir(LEGACY_GAME_DIR):
+        target.rmtree(LEGACY_GAME_DIR)
+        log(f"  removed the old copy in {LEGACY_GAME_DIR} (from an earlier version of this tool)")
+
+
 def cmd_install(args) -> None:
     source = Path(args.source).expanduser()
     with tempfile.TemporaryDirectory(prefix="azs-ps5-", dir=args.workdir) as work:
@@ -658,7 +766,10 @@ def cmd_install(args) -> None:
         total = sum(p.stat().st_size for _, p in files)
         target = open_target(args)
         try:
-            log(f"Installing {len(files)} files ({human(total)}) from {game}")
+            log("The Wine prefix (the game's C: drive and registry):")
+            install_prefix(target, reinstall=args.reinstall_prefix)
+            ensure_game_env(target)
+            log(f"The game: {len(files)} files ({human(total)}) from {game}")
             log(f"  to {target.name}/{GAME_DIR}")
             for rel, path in files:
                 upload(target, f"{GAME_DIR}/{rel}", path)
@@ -667,8 +778,9 @@ def cmd_install(args) -> None:
             marker.pop("version", None)
             marker["data"] = {}
             write_marker(target, marker)
-            log("Adding the launcher profile and controller preset:")
+            log("The launcher profile and controller preset:")
             install_profile(target)
+            remove_legacy(target)
             if args.no_update:
                 log("Skipped the update check (--no-update).")
             else:
@@ -700,6 +812,7 @@ def cmd_status(args) -> None:
             log("Azeroth Survivors is not installed.")
             return
         log(f"Installed in {target.name}/{GAME_DIR}")
+        log(f"  Wine prefix: {'yes' if prefix_complete(target) else 'INCOMPLETE (run install again)'}")
         log(f"  profile: {'yes' if target.size(PROFILE) is not None else 'MISSING'}, "
             f"preset: {'yes' if target.size(PRESET) is not None else 'MISSING'}")
         marker = read_marker(target)
@@ -719,7 +832,8 @@ def cmd_status(args) -> None:
 def cmd_uninstall(args) -> None:
     target = open_target(args)
     try:
-        target.rmtree(GAME_DIR)
+        target.rmtree(PREFIX_DIR)          # the game, its prefix and the settings in it
+        target.rmtree(LEGACY_GAME_DIR)
         target.delete(PROFILE)
         target.delete(PRESET)
         listing = target.get_bytes(PROFILE_LIST)
@@ -728,7 +842,7 @@ def cmd_uninstall(args) -> None:
             if f"{SLUG}.profile" in lines:
                 lines.remove(f"{SLUG}.profile")
                 target.put_bytes(PROFILE_LIST, ("\n".join(lines) + "\n").encode("latin-1"))
-        log("Removed Azeroth Survivors, its profile and its preset.")
+        log("Removed Azeroth Survivors, its Wine prefix, its profile and its preset.")
     finally:
         target.close()
 
@@ -754,6 +868,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("install", help="copy the game to the PS5")
     p.add_argument("source", help="AzerothSurvivorsWindowsNew.rar, a .zip, or the game folder")
     p.add_argument("--no-update", action="store_true", help="don't bring it to the latest version afterwards")
+    p.add_argument("--reinstall-prefix", action="store_true",
+                   help="send the Wine prefix again even if the console has one (resets the game's settings)")
     p.add_argument("--workdir", help="where to extract the archive (default: the system's temp folder)")
     target_args(p)
     p.set_defaults(run=cmd_install)

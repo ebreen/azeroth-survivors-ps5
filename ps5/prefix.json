@@ -1,0 +1,10 @@
+{
+ "prospero_win": "v0.2.0",
+ "wine": "wine-11.17",
+ "asset": "azeroth-survivors-prefix-v0.2.0.zip",
+ "size": 152005311,
+ "sha256": "de99153fdf714f598bdaf95ee3a898a93ee7fe734f183c23e6a827e26daa9a31",
+ "files": 1835,
+ "unpacked": 436094989,
+ "url": "https://github.com/ebreen/azeroth-survivors-ps5/releases/download/prefix-v0.2.0/azeroth-survivors-prefix-v0.2.0.zip"
+}

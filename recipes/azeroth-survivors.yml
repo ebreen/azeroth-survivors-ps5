@@ -1,0 +1,42 @@
+# Azeroth Survivors (Aethus's free WoW roguelike, Windows build) for Prospero Win,
+# in Lutris's installer format, for prospero-win's tools/pw_install.py.
+#
+# There is no installer to run: give the recipe the game folder, the one that holds
+# AzerothSurvivors.exe and Data/ (unpack AzerothSurvivorsWindowsNew.rar first, or let
+# azs_ps5.py do the whole thing). It is copied into C:\Games\AzerothSurvivors of a
+# prefix of its own, made by the pinned host Wine as user "prospero": the console
+# cannot make a prefix itself (no wineboot there, prospero-win patch 0550).
+#
+# AzerothSurvivors.exe is a 64-bit Rust/Bevy program that draws through wgpu's
+# Vulkan backend (winevulkan -> RADV). d3d12 and d3d12core are disabled so wgpu
+# cannot pick its Direct3D 12 backend over Vulkan. The game reads the DualSense
+# through XInput on its own. See docs/HOW_IT_WORKS.md.
+name: "Azeroth Survivors"
+game_slug: azeroth-survivors
+version: Windows build (Prospero Win)
+slug: azeroth-survivors-prospero-win
+runner: wine
+prospero:
+  name: Azeroth Survivors
+  graphics: auto
+  display: {desktop: 1920x1080, scaling: fit, view: window, show_fps: false}
+  input: {preset: azeroth-survivors}
+script:
+  game:
+    exe: drive_c/Games/AzerothSurvivors/AzerothSurvivors.exe
+    prefix: $GAMEDIR
+  files:
+  - game: "N/A:Select the Azeroth Survivors folder (it holds AzerothSurvivors.exe and Data)"
+  wine:
+    overrides:
+      d3d12: disabled
+      d3d12core: disabled
+  installer:
+  - task: {name: create_prefix, prefix: $GAMEDIR}
+  # wgpu hides the console's RADV adapter as "not Vulkan compliant" and the game
+  # stops with "Unable to find a GPU!"; these let it use it (checked on a PS5 with
+  # prospero-win v0.2.0). prospero-win profiles can't set WGPU_* variables, but
+  # Wine reads HKCU\Environment into the game's environment at start.
+  - task: {name: set_regedit, path: 'HKEY_CURRENT_USER\Environment', key: WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER, value: '1'}
+  - task: {name: set_regedit, path: 'HKEY_CURRENT_USER\Environment', key: WGPU_BACKEND, value: vulkan}
+  - copy: {src: game, dst: $GAMEDIR/drive_c/Games/AzerothSurvivors}

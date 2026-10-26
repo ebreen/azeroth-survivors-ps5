@@ -1,0 +1,69 @@
+name: Wine prefix
+
+# Builds the console-ready Wine prefix (tools/build_prefix.sh) from a prospero-win
+# release and publishes it as the release "prefix-<tag>" of this repository.
+# After a run, copy the release's prefix.json to ps5/prefix.json (its url is added
+# by this job) so azs_ps5.py installs that exact file.
+on:
+  workflow_dispatch:
+    inputs:
+      prospero_win:
+        description: prospero-win release tag
+        default: v0.2.0
+      wine:
+        description: WineHQ wine-devel version that release's Wine is (VERSION at its WINE_COMMIT)
+        default: "11.17"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: WineHQ wine-devel ${{ inputs.wine }}
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo mkdir -pm755 /etc/apt/keyrings
+          curl -fsSL https://dl.winehq.org/wine-builds/winehq.key | sudo gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key
+          sudo curl -fsSL -o /etc/apt/sources.list.d/winehq-noble.sources https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
+          sudo apt-get update -qq
+          v="${{ inputs.wine }}~noble-1"
+          sudo apt-get install -y -qq --install-recommends winehq-devel=$v wine-devel=$v wine-devel-amd64=$v wine-devel-i386=$v
+          sudo apt-get install -y -qq xvfb xauth python3-yaml python3-pyftpdlib zip unzip
+          /opt/wine-devel/bin/wine --version
+      - name: Build the prefix
+        run: sh tools/build_prefix.sh "${{ inputs.prospero_win }}" out
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: prefix-${{ inputs.prospero_win }}
+        run: |
+          asset=$(python3 -c 'import json;print(json.load(open("out/prefix.json"))["asset"])')
+          python3 - <<'PY'
+          import json, os
+          m = json.load(open("out/prefix.json"))
+          m["url"] = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}/{m['asset']}"
+          m["built_by"] = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          json.dump(m, open("out/prefix.json", "w"), indent=1)
+          PY
+          cat > notes.md <<EOF
+          The Wine prefix (the game's C: drive and registry) that Azeroth Survivors needs on a PS5
+          with **prospero-win ${{ inputs.prospero_win }}**. \`azs_ps5.py install\` downloads and installs it;
+          you don't need this file by hand. It contains no game files.
+
+          Built by [this workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          with \`tools/build_prefix.sh\`: WineHQ's wine-devel ${{ inputs.wine }} creates it as user
+          \`prospero\`, and every Windows module in it is replaced by the copy in prospero-win
+          ${{ inputs.prospero_win }}'s release zip, so it matches the console's runtime.
+
+          Wine is LGPL-2.1-or-later. Sources: Wine at WineHQ (https://gitlab.winehq.org/wine/wine,
+          wine-${{ inputs.wine }} and the commit pinned in prospero-win's tools/build_wine_ps5.sh) and
+          prospero-win ${{ inputs.prospero_win }} (https://github.com/mpereiraesaa/prospero-win/tree/${{ inputs.prospero_win }}),
+          whose wine/patches/ series the console's modules are built with.
+          EOF
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "Wine prefix for prospero-win ${{ inputs.prospero_win }}" --notes-file notes.md
+          gh release upload "$TAG" "out/$asset" out/prefix.json --clobber
+          cat out/prefix.json

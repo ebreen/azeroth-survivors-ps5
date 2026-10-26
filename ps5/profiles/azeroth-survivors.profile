@@ -26,7 +26,7 @@ name = Azeroth Survivors
 executable = C:\Games\AzerothSurvivors\AzerothSurvivors.exe
 working_directory = C:\Games\AzerothSurvivors
 dll_overrides = d3d12,d3d12core=d
-prefix = default
+prefix = azeroth-survivors
 runtime = wine-wow64
 architecture = pe64
 graphics = auto

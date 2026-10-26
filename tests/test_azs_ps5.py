@@ -91,6 +91,32 @@ class Base(unittest.TestCase):
         azs_ps5.CACHE = self.tmp / "cache"
         self.console = self.tmp / "console"
         self.servers = []
+        self.serve_prefix()
+
+    PREFIX_FILES = {
+        "system.reg": b"WINE REGISTRY Version 2\n\n[Software\\\\Microsoft\\\\Wow64\\\\x86] 1\n@=\"wowprospero.dll\"\n",
+        "user.reg": b"WINE REGISTRY Version 2\n\n[Environment] 1\n\"TEMP\"=\"C:\\\\users\\\\prospero\\\\Temp\"\n\n[Keyboard Layout] 1\n\"1\"=\"00000409\"\n",
+        "userdef.reg": b"WINE REGISTRY Version 2\n",
+        "dosdevices/.pw-symlinks": b"c:\t../drive_c\n",
+        "drive_c/windows/system32/kernel32.dll": b"MZ kernel32" * 100,
+        "drive_c/windows/syswow64/kernel32.dll": b"MZ kernel32 i386" * 100,
+    }
+
+    def serve_prefix(self, files=None):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("drive_c/users/prospero/Documents/", b"")
+            for name, data in (files or self.PREFIX_FILES).items():
+                z.writestr(name, data)
+        blob = buf.getvalue()
+        server = RangeServer({"/prefix.zip": blob})
+        self.servers.append(server)
+        manifest = self.tmp / "prefix.json"
+        manifest.write_text(json.dumps({"prospero_win": "v0.2.0", "url": server.base + "/prefix.zip",
+                                        "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()}))
+        azs_ps5.PREFIX_MANIFEST = manifest
+        azs_ps5.PREFIX_URL = ""
+        self.prefix_server = server
 
     def tearDown(self):
         for s in self.servers:
@@ -106,6 +132,74 @@ class Base(unittest.TestCase):
         server = UpdateServer(self.tmp / "www", **kwargs)
         self.servers.append(server)
         return server
+
+
+class Prefix(Base):
+    def test_install_puts_the_prefix_and_the_gpu_settings(self):
+        code, out = self.run_cli("install", str(make_game(self.tmp / "src")), "--to", str(self.console), "--no-update")
+        self.assertEqual(code, 0, out)
+        prefix = self.console / azs_ps5.PREFIX_DIR
+        self.assertTrue((prefix / "drive_c/windows/system32/kernel32.dll").is_file())
+        self.assertTrue((prefix / "drive_c/users/prospero/Documents").is_dir())
+        self.assertTrue((prefix / "dosdevices/.pw-symlinks").is_file())
+        reg = (prefix / "user.reg").read_text()
+        env = reg[reg.index("[Environment]"):reg.index("[Keyboard Layout]")]
+        self.assertIn('"WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER"="1"', env)
+        self.assertIn('"WGPU_BACKEND"="vulkan"', env)
+        self.assertIn('"TEMP"=', env)
+        self.assertTrue(env.endswith("\n\n"))                       # sections stay apart
+        self.assertTrue((prefix / "drive_c/Games/AzerothSurvivors/AzerothSurvivors.exe").is_file())
+        self.assertIn("prefix = azeroth-survivors", (self.console / azs_ps5.PROFILE).read_text())
+
+    def test_existing_prefix_and_its_settings_are_kept(self):
+        self.run_cli("install", str(make_game(self.tmp / "src")), "--to", str(self.console), "--no-update")
+        reg = self.console / azs_ps5.PREFIX_DIR / "user.reg"
+        reg.write_text(reg.read_text() + "\n[Software\\\\Game] 2\n\"saved\"=\"yes\"\n")
+        hits = len(self.prefix_server.hits)
+        code, out = self.run_cli("install", str(make_game(self.tmp / "src2")), "--to", str(self.console), "--no-update")
+        self.assertEqual(code, 0, out)
+        self.assertIn("keeping it", out)
+        self.assertIn('"saved"="yes"', reg.read_text())
+        self.assertEqual(reg.read_text().count('"WGPU_BACKEND"'), 1)
+        self.assertEqual(len(self.prefix_server.hits), hits)          # nothing downloaded again
+
+    def test_old_settings_get_the_gpu_fix(self):
+        files = dict(self.PREFIX_FILES)
+        files["user.reg"] = b"WINE REGISTRY Version 2\n\n[Keyboard Layout] 1\n"   # no [Environment]
+        self.serve_prefix(files)
+        code, out = self.run_cli("install", str(make_game(self.tmp / "src")), "--to", str(self.console), "--no-update")
+        self.assertEqual(code, 0, out)
+        reg = (self.console / azs_ps5.PREFIX_DIR / "user.reg").read_text()
+        self.assertIn('[Environment]', reg)
+        self.assertIn('"WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER"="1"', reg)
+
+    def test_damaged_prefix_download_is_refused(self):
+        self.prefix_server.files["/prefix.zip"] = b"not the zip" * 50
+        code, out = self.run_cli("install", str(make_game(self.tmp / "src")), "--to", str(self.console), "--no-update")
+        self.assertEqual(code, 1)
+        self.assertFalse((self.console / azs_ps5.PREFIX_DIR / "user.reg").exists())
+
+    def test_removes_the_copy_an_earlier_version_left_in_the_default_prefix(self):
+        legacy = self.console / azs_ps5.LEGACY_GAME_DIR
+        legacy.mkdir(parents=True)
+        (legacy / "AzerothSurvivors.exe").write_bytes(b"old")
+        (self.console / "prefix/dosdevices").mkdir(parents=True)
+        code, out = self.run_cli("install", str(make_game(self.tmp / "src")), "--to", str(self.console), "--no-update")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(legacy.exists())
+        self.assertTrue((self.console / "prefix/dosdevices").is_dir())   # the rest of the default prefix stays
+
+    def test_uninstall_removes_the_prefix(self):
+        self.run_cli("install", str(make_game(self.tmp / "src")), "--to", str(self.console), "--no-update")
+        code, out = self.run_cli("uninstall", "--to", str(self.console))
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.console / azs_ps5.PREFIX_DIR).exists())
+
+    def test_the_shipped_manifest_is_complete(self):
+        manifest = json.loads((ROOT / "ps5/prefix.json").read_text())
+        for key in ("prospero_win", "url", "sha256", "size"):
+            self.assertTrue(manifest.get(key), key)
+        self.assertRegex(manifest["sha256"], r"^[0-9a-f]{64}$")
 
 
 class LocalInstall(Base):
