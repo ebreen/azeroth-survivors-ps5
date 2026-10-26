@@ -222,6 +222,130 @@ class Updates(Base):
         self.assertIn("Could not update", out)
 
 
+class RangeServer:
+    """Serves {path: bytes} with byte ranges (like the mirror's Cloudflare front),
+    counting the requests it gets."""
+
+    def __init__(self, files: dict):
+        self.files, self.hits = files, []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                outer.hits.append((self.path, self.headers.get("Range")))
+                body = outer.files.get(self.path)
+                if body is None:
+                    self.send_error(404)
+                    return
+                start = 0
+                rng = self.headers.get("Range")
+                if rng and rng.startswith("bytes="):
+                    start = int(rng[6:].split("-")[0])
+                    self.send_response(206)
+                else:
+                    self.send_response(200)
+                self.send_header("Content-Length", str(len(body) - start))
+                self.end_headers()
+                self.wfile.write(body[start:])
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_port}"
+
+    def close(self):
+        self.httpd.shutdown()
+
+
+def mirror_page(href: str, sha: str, version="0.115.0") -> bytes:
+    return f"""<html><body><main><h1>Azeroth Survivors</h1>
+<p class="filename">AzerothSurvivorsWindowsNew.rar</p><p class="version">Version: {version}</p>
+<a class="button" href="{href}">Download</a>
+<dl class="checksums"><dt>SHA-256</dt><dd><code>{sha}</code></dd><dt>MD5</dt><dd><code>x</code></dd></dl>
+</main></body></html>""".encode()
+
+
+class Fetch(Base):
+    RAR = b"Rar!\x1a\x07\x01\x00" + bytes(range(256)) * 400
+
+    def start(self, page=True, official=True, mirror_body=None):
+        sha = hashlib.sha256(self.RAR).hexdigest()
+        files = {}
+        if page:
+            files["/"] = mirror_page("/downloads/123-abc/AzerothSurvivorsWindowsNew.rar", sha)
+        files["/downloads/123-abc/AzerothSurvivorsWindowsNew.rar"] = mirror_body if mirror_body is not None else self.RAR
+        if official:
+            files["/download/AzerothSurvivorsWindowsNew.rar"] = self.RAR
+        server = RangeServer(files)
+        self.servers.append(server)
+        azs_ps5.MIRROR_PAGE = server.base + "/"
+        azs_ps5.DOWNLOAD_URL = server.base + "/download/AzerothSurvivorsWindowsNew.rar"
+        self.out = self.tmp / "dl"
+        return server
+
+    def test_mirror_is_used_and_checked(self):
+        server = self.start()
+        code, out = self.run_cli("fetch", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.out / "AzerothSurvivorsWindowsNew.rar").read_bytes(), self.RAR)
+        self.assertIn("SHA-256 checked", out)
+        self.assertIn("version 0.115.0", out)
+        self.assertNotIn("/download/AzerothSurvivorsWindowsNew.rar", [p for p, _ in server.hits])
+        code, out = self.run_cli("fetch", str(self.out))
+        self.assertIn("already there", out)
+
+    def test_resumes_a_partial_download(self):
+        server = self.start()
+        self.out.mkdir()
+        (self.out / "AzerothSurvivorsWindowsNew.rar.part").write_bytes(self.RAR[:30000])
+        code, out = self.run_cli("fetch", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertIn(("/downloads/123-abc/AzerothSurvivorsWindowsNew.rar", "bytes=30000-"), server.hits)
+        self.assertEqual((self.out / "AzerothSurvivorsWindowsNew.rar").read_bytes(), self.RAR)
+
+    def test_stale_partial_from_another_version_starts_over(self):
+        self.start()
+        self.out.mkdir()
+        (self.out / "AzerothSurvivorsWindowsNew.rar.part").write_bytes(b"something else" * 100)
+        code, out = self.run_cli("fetch", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertIn("starting over", out)
+        self.assertEqual((self.out / "AzerothSurvivorsWindowsNew.rar").read_bytes(), self.RAR)
+
+    def test_damaged_mirror_file_falls_back_to_official(self):
+        server = self.start(mirror_body=b"corrupted" * 1000)
+        code, out = self.run_cli("fetch", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertIn("trying the official link", out)
+        self.assertIn(("/download/AzerothSurvivorsWindowsNew.rar", None), server.hits)
+        self.assertEqual((self.out / "AzerothSurvivorsWindowsNew.rar").read_bytes(), self.RAR)
+
+    def test_mirror_page_down_falls_back_to_official(self):
+        self.start(page=False)
+        code, out = self.run_cli("fetch", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertIn("mirror is unavailable", out)
+        self.assertEqual((self.out / "AzerothSurvivorsWindowsNew.rar").read_bytes(), self.RAR)
+
+    def test_official_flag(self):
+        server = self.start()
+        code, out = self.run_cli("fetch", str(self.out), "--official")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([p for p, _ in server.hits], ["/download/AzerothSurvivorsWindowsNew.rar"])
+
+    def test_parses_the_real_page_layout(self):
+        # tests/fixtures/mirror-page.html is the mirror's page as served on 2026-10-26.
+        page = (ROOT / "tests/fixtures/mirror-page.html").read_bytes()
+        server = RangeServer({"/": page})
+        self.servers.append(server)
+        release = azs_ps5.mirror_release(server.base + "/")
+        self.assertEqual(release["sha256"], "971db7968dc37ec50b18d64a1de7f693e137f6793a7368e4d5c27bd9522eccd8")
+        self.assertEqual(release["version"], "0.115.0")
+        self.assertEqual(release["name"], "AzerothSurvivorsWindowsNew.rar")
+        self.assertTrue(release["url"].startswith(server.base + "/downloads/"))
+
 try:
     from pyftpdlib.authorizers import DummyAuthorizer
     from pyftpdlib.handlers import FTPHandler

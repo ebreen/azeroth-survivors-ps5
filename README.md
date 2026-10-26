@@ -60,8 +60,7 @@ The details, and how each one was checked, are in [docs/HOW_IT_WORKS.md](docs/HO
 git clone https://github.com/ebreen/azeroth-survivors-ps5
 cd azeroth-survivors-ps5
 
-# 1. Get the official Windows build (~725 MB) from wow.aethus.pl.
-#    Or download it yourself from the site's "download the game for Windows" link.
+# 1. Get the Windows build (~725 MB) from the developers' download mirror.
 python3 azs_ps5.py fetch
 
 # 2. Copy it to the PS5: the game, its launcher profile and controller preset,
@@ -70,6 +69,15 @@ python3 azs_ps5.py install AzerothSurvivorsWindowsNew.rar --host 192.168.1.50
 ```
 
 Use your PS5's IP address. On Windows, type `py` instead of `python3`.
+
+`fetch` downloads from the developers' mirror,
+[azerothsurvivors-mirror.sandervspl.dev](https://azerothsurvivors-mirror.sandervspl.dev/).
+It reads the current file and its SHA-256 from the mirror's page, checks the
+download against that SHA-256, and carries on from where it stopped if it was
+interrupted. The official link on wow.aethus.pl is much slower (around
+70 KB/s in our test, against 20–30 MB/s from the mirror). `fetch` uses it only
+when the mirror is down or its file fails the check; `--official` forces it.
+If you already have the `.rar`, skip `fetch` and give `install` its path.
 
 The first copy is about 1.6 GB. The PS5's FTP server manages about
 15–20 MB/s, so it takes a couple of minutes. If it gets interrupted, run
@@ -189,8 +197,9 @@ would be the next step.
 *Azeroth Survivors* is a free fan game by **Aethus**, made with World of
 Warcraft art from a WoW 1.12.1 client. It is not affiliated with or endorsed
 by Blizzard Entertainment. This repository ships no game files, no Blizzard
-content and no Windows programs. The script downloads the game only from
-Aethus's own site and update server, the same places the game itself uses.
+content and no Windows programs. The script downloads the game only from the
+developers' download mirror, Aethus's own site and the game's own update
+server.
 World of Warcraft is a trademark of Blizzard Entertainment, Inc.
 prospero-win is LGPL-2.1-or-later, by its authors.
 

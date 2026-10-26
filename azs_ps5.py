@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Put Azeroth Survivors (the Windows build) on a jailbroken PS5 running prospero-win.
 
-    azs_ps5.py fetch [DIR]                     download the official Windows build (.rar)
+    azs_ps5.py fetch [DIR]                     download the Windows build (.rar) from the
+                                               developers' mirror, checking its SHA-256
     azs_ps5.py install SOURCE --host PS5_IP    copy the game, its profile and its
                                                controller preset to the console
     azs_ps5.py update --host PS5_IP            bring the console's copy to the latest
@@ -24,10 +25,12 @@ import argparse
 import ftplib
 import gzip
 import hashlib
+import html
 import io
 import json
 import os
 import posixpath
+import re
 import shutil
 import struct
 import subprocess
@@ -51,9 +54,13 @@ PRESET = f"input/{SLUG}.input"
 MARKER = f"{GAME_DIR}/azs-ps5.json"                      # what this tool last put there
 CATALOG_MAX = 16                                          # the launcher drops profiles.lst above this
 
+# Where `fetch` gets the Windows build: the developers' fast download mirror (its page
+# names the current .rar, its version and its SHA-256), falling back to the official
+# link on wow.aethus.pl, which is much slower.
+MIRROR_PAGE = os.environ.get("AZS_MIRROR_URL", "https://azerothsurvivors-mirror.sandervspl.dev/")
+DOWNLOAD_URL = os.environ.get("AZS_DOWNLOAD_URL", "https://wow.aethus.pl/download/AzerothSurvivorsWindowsNew.rar")
 # The game's own update channel (the same URLs the game's updater reads, overridable
 # the same way: WOW_ROGUE_UPDATE_URL / WOW_ROGUE_DATA_URL).
-DOWNLOAD_URL = "https://wow.aethus.pl/download/AzerothSurvivorsWindowsNew.rar"
 UPDATE_URL = os.environ.get("WOW_ROGUE_UPDATE_URL", "https://wow.aethus.pl/exe/latest.json")
 DATA_URL = os.environ.get("WOW_ROGUE_DATA_URL", "https://wow.aethus.pl/exe/data/patches.json")
 USER_AGENT = "azeroth-survivors-ps5 (+https://github.com/ebreen/azeroth-survivors-ps5)"
@@ -551,23 +558,95 @@ def run_update(target, check_exe_hash: bool = True) -> None:
 
 # ---------------------------------------------------------------- commands
 
+def mirror_release(page_url: str) -> dict:
+    """The .rar the mirror page offers: {url, name, sha256, version}. The page links a
+    new /downloads/<id>/<name>.rar for each release and prints its SHA-256."""
+    try:
+        page = http_get(page_url).decode("utf-8", "replace")
+    except OSError as error:
+        raise Failure(f"could not read the mirror page {page_url}: {error}") from error
+    link = re.search(r'href="([^"]+\.rar)"', page, re.I)
+    text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", page)))
+    sha = re.search(r"SHA-?256\s*([0-9a-fA-F]{64})", text)
+    if not link or not sha:
+        raise Failure(f"the mirror page {page_url} doesn't list a .rar with its SHA-256")
+    url = urllib.parse.urljoin(page_url, html.unescape(link.group(1)))
+    version = re.search(r"Version:?\s*([0-9][\w.\-]*)", text)
+    return {"url": url, "name": posixpath.basename(urllib.parse.urlparse(url).path),
+            "sha256": sha.group(1).lower(), "version": version.group(1) if version else None}
+
+
+def download(url: str, out: Path, sha: str | None = None) -> None:
+    """Downloads url to out through out.part, picking up a .part left by an earlier try
+    when the server takes byte ranges, and checks the SHA-256 when one is given."""
+    tmp = out.with_name(out.name + ".part")
+    have = tmp.stat().st_size if tmp.is_file() else 0
+    headers = {"User-Agent": USER_AGENT}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        resumed = have and response.status == 206
+        if have and not resumed:
+            have = 0
+        length = int(response.headers.get("Content-Length") or 0)
+        progress = Progress(out.name, have + length)
+        progress.done = have
+        with tmp.open("ab" if resumed else "wb") as f:
+            for block in iter(lambda: response.read(1 << 20), b""):
+                f.write(block)
+                progress.add(len(block))
+    progress.finish()
+    if resumed:
+        log(f"  (carried on from {human(have)})")
+    if sha:
+        got = sha256_file(tmp)
+        if got != sha:
+            tmp.unlink()
+            if resumed:
+                # The piece from an earlier try was of another file; start over once.
+                log("  the earlier partial download didn't match; starting over")
+                return download(url, out, sha)
+            raise Failure(f"{out.name}: the download is damaged (SHA-256 {got}, expected {sha})")
+        log(f"  SHA-256 checked: {sha}")
+    os.replace(tmp, out)
+
+
 def cmd_fetch(args) -> None:
     dest = Path(args.dir).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
-    out = dest / posixpath.basename(urllib.parse.urlparse(DOWNLOAD_URL).path)
+    release = None
+    if not args.official:
+        try:
+            release = mirror_release(MIRROR_PAGE)
+        except Failure as error:
+            log(f"The mirror is unavailable ({error}); using the official link, which is slower.")
+    if release:
+        url, sha = release["url"], release["sha256"]
+        out = dest / release["name"]
+        where = f"the mirror ({urllib.parse.urlparse(MIRROR_PAGE).netloc}), version {release['version'] or '?'}"
+    else:
+        url, sha = DOWNLOAD_URL, None
+        out = dest / posixpath.basename(urllib.parse.urlparse(DOWNLOAD_URL).path)
+        where = "the official link on wow.aethus.pl"
     if out.is_file() and not args.force:
-        log(f"{out} is already there (--force downloads it again)")
-        return
-    log(f"Downloading the official Windows build from {DOWNLOAD_URL}")
-    request = urllib.request.Request(DOWNLOAD_URL, headers={"User-Agent": USER_AGENT})
-    tmp = out.with_suffix(".part")
-    with urllib.request.urlopen(request, timeout=60) as response, tmp.open("wb") as f:
-        progress = Progress(out.name, int(response.headers.get("Content-Length") or 0))
-        for block in iter(lambda: response.read(1 << 20), b""):
-            f.write(block)
-            progress.add(len(block))
-    progress.finish()
-    os.replace(tmp, out)
+        if sha and sha256_file(out) != sha:
+            log(f"{out} is there but isn't the mirror's current version; downloading it again")
+        else:
+            log(f"{out} is already there (--force downloads it again)")
+            return
+    log(f"Downloading the Windows build from {where}")
+    try:
+        download(url, out, sha)
+    except (OSError, Failure) as error:
+        if not release:
+            raise Failure(f"download failed: {error}") from error
+        log(f"The mirror download failed ({error}); trying the official link, which is slower.")
+        out = dest / posixpath.basename(urllib.parse.urlparse(DOWNLOAD_URL).path)
+        stale = out.with_name(out.name + ".part")
+        if stale.is_file():
+            stale.unlink()      # the mirror's piece; the official link has no checksum to vouch for it
+        download(DOWNLOAD_URL, out)
     log(f"Saved {out}. Next: azs_ps5.py install \"{out}\" --host <PS5 IP>")
 
 
@@ -667,7 +746,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("fetch", help="download the official Windows build")
     p.add_argument("dir", nargs="?", default=".")
-    p.add_argument("--force", action="store_true")
+    p.add_argument("--force", action="store_true", help="download again even if the file is there")
+    p.add_argument("--official", action="store_true",
+                   help="use the official link on wow.aethus.pl instead of the (much faster) mirror")
     p.set_defaults(run=cmd_fetch)
 
     p = sub.add_parser("install", help="copy the game to the PS5")
