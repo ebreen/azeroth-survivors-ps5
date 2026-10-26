@@ -2,8 +2,39 @@
 
 These notes come from reading the official Windows build
 (`AzerothSurvivors.exe`: v0.115.0 from `AzerothSurvivorsWindowsNew.rar`,
-and v0.120.0 from the update server) together with prospero-win's source. They
-haven't been checked on a console yet.
+and v0.120.0 from the update server) together with prospero-win's source,
+and from the title logs of the first runs on a PS5 (prospero-win v0.2.0,
+2026-10-26). The game runs: smooth, full screen, DualSense working.
+
+## What it took on the console
+
+1. **A prefix of its own.** The first run (in prospero-win's default prefix,
+   which held only the game) ended at once with
+   `run_wineboot failed to start wineboot c00000bb` and
+   `wine: could not load kernel32.dll, status c0000135`: the console can't run
+   `wineboot`, so it can't create a prefix, and prospero-win's docs have users
+   make one on a Linux PC. `tools/build_prefix.sh` does that once, in CI:
+   WineHQ's wine-devel 11.17 (prospero-win v0.2.0 pins a Wine 11.17 commit, and
+   none of its 88 patches touches `wine.inf` or `wineboot`) creates the prefix
+   as user `prospero` through prospero-win's own `pw_install.py`, every module
+   in `system32`/`syswow64` is replaced by the copy in prospero-win's release
+   (so they are byte for byte the console's), and `pw_prefix.py` converts it to
+   the console layout. The result is published as a release; `azs_ps5.py`
+   installs it.
+2. **Letting wgpu use the console's GPU.** In its own prefix the game started,
+   loaded its data and Wine's Vulkan (`vulkan-1.dll`, `winevulkan.dll`, RADV
+   came up), then stopped: `panicked at bevy_render-0.18.1/src/renderer/mod.rs:281:
+   Unable to find a GPU!` (its crash report in
+   `C:\Games\AzerothSurvivors\benilla-config\Diagnostics` says the same).
+   With `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1` and
+   `WGPU_BACKEND=vulkan` the next run started and played. wgpu hides Vulkan
+   adapters whose driver reports no conformance version unless that flag is
+   set, which fits a port of RADV to the PS5; the log lines that would say so
+   had rotated out of the console's log, so that cause is inferred, not read.
+   prospero-win profiles only pass `PW_`, `DXVK_`, `MESA_`, `GALLIUM_`,
+   `ZINK_`, `RADV_` and `VK_` variables, but Wine's ntdll reads
+   `HKCU\Environment` into the first process's environment
+   (`add_registry_environment`), so the prefix's `user.reg` carries them.
 
 ## The program
 

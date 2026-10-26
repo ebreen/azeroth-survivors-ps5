@@ -5,28 +5,31 @@ roguelike by Aethus, on a jailbroken PS5. It uses
 **[prospero-win](https://github.com/mpereiraesaa/prospero-win)**, which runs
 Windows games on the console with its own copy of Wine.
 
+**Status: it runs on a PS5** with prospero-win v0.2.0 (tested 2026-10-26):
+smooth, full screen, DualSense through the game's own gamepad support.
+
 This repository has no game files in it. It has:
 
 - a **launcher profile** and a **DualSense preset** for prospero-win
   (`ps5/`);
-- **`azs_ps5.py`**, one Python script that copies the game to the PS5 over
-  FTP, adds it to the launcher and keeps it up to date from the game's own
-  official update server.
+- the **Wine prefix** the game runs in (its C: drive and registry), built by
+  GitHub Actions from prospero-win's own release and published under
+  [Releases](../../releases). It holds no game files;
+- **`azs_ps5.py`**, one Python script that puts all of that and the game on
+  the PS5 over FTP, adds it to the launcher and keeps it up to date from the
+  game's own official update server.
 
-> [!WARNING]
-> Not tested on a PS5 yet. The setup follows how prospero-win runs games,
-> and the profile and preset pass prospero-win's own parser. The game's
-> renderer, gamepad code and updater were checked by reading the Windows
-> build, not by playing it on a console. If you try it, please
-> [open an issue](../../issues) with your firmware, your prospero-win
-> version and what happened. A log helps a lot.
+If it doesn't work for you, please [open an issue](../../issues) with your
+firmware, your prospero-win version and the newest
+`/data/prospero-win/logs/session-*.log`.
 
 ## How it runs
 
 | | |
 |---|---|
 | Program | `AzerothSurvivors.exe`, 64-bit (Rust + Bevy). It runs natively on the PS5's CPU, so there's no x86 translation. |
-| Graphics | wgpu → Vulkan → winevulkan → the console's Vulkan driver (RADV). No DXVK, no Zink. The profile turns off `d3d12` so wgpu can't pick its Direct3D 12 path. |
+| Graphics | wgpu → Vulkan → winevulkan → the console's Vulkan driver (RADV). No DXVK, no Zink. wgpu turns the console's driver down as "not Vulkan compliant" unless `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1` is set (the game then stops with *"Unable to find a GPU!"*), so the prefix's registry sets that and `WGPU_BACKEND=vulkan`. |
+| Wine prefix | prospero-win can't create one on the console (it can't run `wineboot` there), so the game gets a prefix of its own, made on a PC with the same Wine version and with every Windows module replaced by the copy in prospero-win's release. |
 | Controller | The game has its own gamepad support. Under Wine it reads controllers through XInput, and prospero-win makes the DualSense look like an Xbox controller, so the game sees it as controller 0. |
 | Keyboard and mouse | USB keyboard and mouse work alongside the pad. The mouse wheel doesn't work in prospero-win yet, so camera zoom by wheel is out. |
 | Updates | The in-game updater runs on the console, and `azs_ps5.py update` does the same job from your PC. See [Updates](#updates). |
@@ -40,7 +43,8 @@ The details, and how each one was checked, are in [docs/HOW_IT_WORKS.md](docs/HO
 - A jailbreak that runs homebrew, with an FTP server on port 2121 and an
   ELF loader (for example `ftpsrv` and `elfldr` from
   [ps5-payload-dev](https://github.com/ps5-payload-dev)).
-- **prospero-win**, installed and opened once. Follow its
+- **prospero-win v0.2.0**, installed and opened once. The Wine prefix is
+  made for that version's runtime. Follow its
   [Getting started](https://github.com/mpereiraesaa/prospero-win/blob/main/docs/GETTING_STARTED.md)
   steps 1 and 2, which use the zip from its
   [Releases](https://github.com/mpereiraesaa/prospero-win/releases) and a
@@ -63,8 +67,8 @@ cd azeroth-survivors-ps5
 # 1. Get the Windows build (~725 MB) from the developers' download mirror.
 python3 azs_ps5.py fetch
 
-# 2. Copy it to the PS5: the game, its launcher profile and controller preset,
-#    then update it to the latest version.
+# 2. Copy it to the PS5: the Wine prefix (~150 MB download), the game, its
+#    launcher profile and controller preset, then update it to the latest version.
 python3 azs_ps5.py install AzerothSurvivorsWindowsNew.rar --host 192.168.1.50
 ```
 
@@ -79,9 +83,9 @@ interrupted. The official link on wow.aethus.pl is much slower (around
 when the mirror is down or its file fails the check; `--official` forces it.
 If you already have the `.rar`, skip `fetch` and give `install` its path.
 
-The first copy is about 1.6 GB. The PS5's FTP server manages about
-15–20 MB/s, so it takes a couple of minutes. If it gets interrupted, run
-the same command again: files already on the console are skipped.
+The first copy is about 2.1 GB (the prefix is ~1,800 small files, which the
+PS5's FTP server is slowest at). Expect 3–6 minutes. If it gets interrupted,
+run the same command again: files already on the console are skipped.
 
 Then start **prospero-win** on the PS5 and pick **Azeroth Survivors**.
 
@@ -89,15 +93,19 @@ Then start **prospero-win** on the PS5 and pick **Azeroth Survivors**.
 
 ```text
 /data/prospero-win/
-  prefix/drive_c/Games/AzerothSurvivors/   AzerothSurvivors.exe, Data/*.MPQ   (C:\Games\AzerothSurvivors)
+  prefixes/azeroth-survivors/                              the game's Wine prefix (C: drive, registry)
+  prefixes/azeroth-survivors/drive_c/Games/AzerothSurvivors/   AzerothSurvivors.exe, Data/*.MPQ
   profiles/azeroth-survivors.profile
   profiles/profiles.lst                    the game is added if the list exists
   input/azeroth-survivors.input
 ```
 
-The game goes into prospero-win's **default prefix**, so you don't need a
-Linux PC or a Wine build. If you'd rather copy things yourself (another FTP
-client, a USB drive), `--to DIR` writes the same layout into a local folder:
+You don't need a Linux PC or a Wine build: the prefix comes ready-made from
+this repository's releases (`ps5/prefix.json` pins its SHA-256). An existing
+prefix on the console is kept, so reinstalling or updating doesn't reset the
+game's settings; `--reinstall-prefix` sends it again. If you'd rather copy
+things yourself (another FTP client, a USB drive), `--to DIR` writes the same
+layout into a local folder:
 
 ```sh
 python3 azs_ps5.py install AzerothSurvivorsWindowsNew.rar --to ./ps5-copy
@@ -151,7 +159,7 @@ If you'd rather not see that message, choose **Later** in the game and run
 
 ```sh
 python3 azs_ps5.py status    --host IP [--offline]   # what's installed
-python3 azs_ps5.py uninstall --host IP               # remove the game, profile and preset
+python3 azs_ps5.py uninstall --host IP               # remove the game, its prefix, profile and preset
 ```
 
 Each command also takes `--port` (default 2121), `--remote` (default
@@ -163,12 +171,18 @@ Each command also takes `--port` (default 2121), `--remote` (default
   `/data/prospero-win/profiles/profiles.lst`, the launcher shows only what's
   listed there, up to 16 games. `install` adds the game unless the list is
   already full, in which case it tells you.
-- **Black screen or it goes straight back to the launcher.** Check that your
-  prospero-win build runs a 64-bit Vulkan game. Its *Vulkan probe, x64* is
-  in its hardware validation, and 64-bit DXVK games like Kerbal Space
-  Program run on v0.2.0. Then open an issue and attach the title log (see
-  prospero-win's
-  [debugging guide](https://github.com/mpereiraesaa/prospero-win/blob/main/docs/DEBUGGING_GUIDE.md)).
+- **It goes straight back to the launcher.** Look at the newest
+  `/data/prospero-win/logs/session-*.log`:
+  - `could not load kernel32.dll`: the Wine prefix is missing or incomplete.
+    Run `install` again (or with `--reinstall-prefix`).
+  - `Unable to find a GPU!`: the prefix's registry lacks the GPU settings.
+    Run `install` again; it puts them back without touching anything else.
+  - anything else: open an issue and attach the log (prospero-win's
+    [debugging guide](https://github.com/mpereiraesaa/prospero-win/blob/main/docs/DEBUGGING_GUIDE.md)
+    explains them).
+- **A newer prospero-win than v0.2.0.** The prefix's Windows modules come from
+  v0.2.0's runtime. If a newer prospero-win won't start the game, open an
+  issue; a prefix for it is one workflow run (`.github/workflows/prefix.yml`).
 - **The pad does nothing.** The profile's preset has to be on the console
   (`input/azeroth-survivors.input`). Run `install` again, or `status`, which
   reports whether it's there.
@@ -183,21 +197,26 @@ python3 -m unittest discover -s tests -v
 ```
 
 The tests run `azs_ps5.py` against a local folder, an FTP server (if
-`pyftpdlib` is installed) and a fake update server. CI also checks the
+`pyftpdlib` is installed), a fake update server and a fake prefix release. CI
+also checks the
 profile and preset with
 [prospero-win-profiles](https://github.com/mpereiraesaa/prospero-win-profiles)'
 `check_profiles.py`, which reads them the same way prospero-win does.
 
-If you get it running, a profile for
-[prospero-win-profiles](https://github.com/mpereiraesaa/prospero-win-profiles)
-would be the next step.
+`tools/build_prefix.sh` builds the prefix (on x86-64 Linux with WineHQ's
+wine-devel 11.17); the **Wine prefix** workflow runs it and publishes the
+release. `recipes/azeroth-survivors.yml` is the same setup as a
+[prospero-win](https://github.com/mpereiraesaa/prospero-win) `pw_install.py`
+recipe, for installing it the way prospero-win's own docs describe.
 
 ## Legal
 
 *Azeroth Survivors* is a free fan game by **Aethus**, made with World of
 Warcraft art from a WoW 1.12.1 client. It is not affiliated with or endorsed
 by Blizzard Entertainment. This repository ships no game files, no Blizzard
-content and no Windows programs. The script downloads the game only from the
+content and no Windows programs of its own; the prefix release contains Wine's
+modules (LGPL-2.1-or-later; sources are linked from the release). The script
+downloads the game only from the
 developers' download mirror, Aethus's own site and the game's own update
 server.
 World of Warcraft is a trademark of Blizzard Entertainment, Inc.
